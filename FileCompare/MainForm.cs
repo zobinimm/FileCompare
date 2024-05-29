@@ -28,6 +28,8 @@ namespace FileCompare
             bgWorker.DoWork += BgWorker_DoWork;
             bgWorker.RunWorkerCompleted += BgWorker_RunWorkerCompleted;
             panel1.Visible = false;
+            txtPath1.Text = @"H:\";
+            txtPath2.Text = @"I:\";
         }
 
         private void BgWorker_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
@@ -123,16 +125,53 @@ namespace FileCompare
         private ConcurrentDictionary<string, (long size, string hash)> GetFileHashes(string folderPath)
         {
             var fileHashes = new ConcurrentDictionary<string, (long size, string hash)>();
-            var files = Directory.GetFiles(folderPath, "*.*", SearchOption.AllDirectories);
+            var fileList = new List<string>();
 
-            Parallel.ForEach(files, filePath =>
+            try
             {
-                var fileInfo = new FileInfo(filePath);
-                string hash = ComputeMD5(filePath);
-                fileHashes[filePath] = (fileInfo.Length, hash);
+                foreach (var file in EnumerateFilesSafe(folderPath))
+                {
+                    fileList.Add(file);
+                }
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                Console.WriteLine($"Access denied to folder: {ex.Message}");
+            }
+
+            Parallel.ForEach(fileList, filePath =>
+            {
+                try
+                {
+                    var fileInfo = new FileInfo(filePath);
+                    string hash = ComputeMD5(filePath);
+                    fileHashes[filePath] = (fileInfo.Length, hash);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    Console.WriteLine($"Access denied to file: {filePath}");
+                }
             });
 
             return fileHashes;
+        }
+
+        private IEnumerable<string> EnumerateFilesSafe(string path)
+        {
+            var files = new List<string>();
+            try
+            {
+                files.AddRange(Directory.EnumerateFiles(path, "*.*", SearchOption.TopDirectoryOnly));
+                foreach (var dir in Directory.EnumerateDirectories(path))
+                {
+                    files.AddRange(EnumerateFilesSafe(dir));
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Get folder: {path} Error:{ex.Message}");
+            }
+            return files;
         }
 
         private string ComputeMD5(string filePath)
