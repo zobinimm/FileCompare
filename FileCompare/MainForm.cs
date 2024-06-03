@@ -58,7 +58,7 @@ namespace FileCompare
             {
                 foreach (var file2 in fileHashes2)
                 {
-                    if (file1.Value == file2.Value)
+                    if (!file1.Key.Equals(file2.Key) && file1.Value == file2.Value)
                     {
                         if (!fileName1.Contains(file1.Key)) fileName1.Add(file1.Key);
                         if (!fileName2.Contains(file2.Key)) fileName2.Add(file2.Key);
