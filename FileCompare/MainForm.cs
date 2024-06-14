@@ -18,10 +18,6 @@ namespace FileCompare
         private delegate void DelegateSetFormEnable(bool isEnable);
         private delegate void DelegateSetList();
         private delegate void DelegateSetLblPro(string lblText);
-
-        private ConcurrentDictionary<string, (long size, string hash)> fileHashes1;
-        private ConcurrentDictionary<string, (long size, string hash)> fileHashes2;
-
         private FileInfoDB fileInfoDBcontext = new FileInfoDB();
         private List<FileContext> FileContextList;
         private string reportFile;
