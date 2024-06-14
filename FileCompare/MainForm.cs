@@ -36,10 +36,8 @@ namespace FileCompare
             bgWorker.RunWorkerCompleted += BgWorker_RunWorkerCompleted;
             bgWorker.ProgressChanged += new ProgressChangedEventHandler(BgWorker_ProgressChanged);
             panel1.Visible = false;
-            //txtPath1.Text = @"H:\";
-            //txtPath2.Text = @"I:\";
-            txtPath1.Text = @"D:\download\10M-ファイルs1";
-            txtPath2.Text = @"D:\download\10M-ファイルs1";
+            txtPath1.Text = @"H:\";
+            txtPath2.Text = @"I:\";
         }
 
 
