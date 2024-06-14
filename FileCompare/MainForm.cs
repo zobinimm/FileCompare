@@ -1,11 +1,15 @@
-﻿using System;
+﻿using DocumentFormat.OpenXml;
+using DocumentFormat.OpenXml.Packaging;
+using DocumentFormat.OpenXml.Spreadsheet;
+using FileCompare.Models;
+using Microsoft.EntityFrameworkCore;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.ComponentModel;
-using System.IO;
-using System.Text;
-using System.Threading.Tasks;
-using System.Windows.Forms;
+using System.Data;
+using System.Diagnostics;
+using System.Security.Cryptography;
+using Color = DocumentFormat.OpenXml.Spreadsheet.Color;
+using Font = DocumentFormat.OpenXml.Spreadsheet.Font;
 
 namespace FileCompare
 {
@@ -13,12 +17,15 @@ namespace FileCompare
     {
         private delegate void DelegateSetFormEnable(bool isEnable);
         private delegate void DelegateSetList();
+        private delegate void DelegateSetLblPro(string lblText);
 
         private ConcurrentDictionary<string, (long size, string hash)> fileHashes1;
         private ConcurrentDictionary<string, (long size, string hash)> fileHashes2;
 
-        private List<string> fileName1;
-        private List<string> fileName2;
+        private FileInfoDB fileInfoDBcontext = new FileInfoDB();
+        private List<FileContext> FileContextList;
+        private string reportFile;
+
 
         public MainForm()
         {
@@ -27,9 +34,23 @@ namespace FileCompare
             bgWorker.WorkerSupportsCancellation = true;
             bgWorker.DoWork += BgWorker_DoWork;
             bgWorker.RunWorkerCompleted += BgWorker_RunWorkerCompleted;
+            bgWorker.ProgressChanged += new ProgressChangedEventHandler(BgWorker_ProgressChanged);
             panel1.Visible = false;
-            txtPath1.Text = @"H:\";
-            txtPath2.Text = @"I:\";
+            //txtPath1.Text = @"H:\";
+            //txtPath2.Text = @"I:\";
+            txtPath1.Text = @"D:\download\10M-ファイルs1";
+            txtPath2.Text = @"D:\download\10M-ファイルs1";
+        }
+
+
+
+        private void MainForm_Load(object sender, EventArgs e)
+        {
+            if (File.Exists(fileInfoDBcontext.DbPath))
+            {
+                fileInfoDBcontext.Database.ExecuteSqlRaw("DELETE FROM FileContext");
+            }
+            reportFile = Path.Combine(Path.GetDirectoryName(fileInfoDBcontext.DbPath), "Report.xlsx");
         }
 
         private void BgWorker_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
@@ -38,39 +59,53 @@ namespace FileCompare
             {
                 MessageBox.Show("Process was cancelled", "Process Cancelled");
             }
-            else
-            {
-                SetListInTask();
-            }
             SetFormEnableInTask(true);
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = reportFile,
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Failed to open file: {ex.Message}");
+            }
+        }
+
+        private void BgWorker_ProgressChanged(object sender, ProgressChangedEventArgs e)
+        {
+            progressBar1.Value = e.ProgressPercentage;
         }
 
         private void BgWorker_DoWork(object sender, DoWorkEventArgs e)
         {
-            SetFormEnableInTask(false);
-            string folderPath1 = @txtPath1.Text;
-            string folderPath2 = @txtPath2.Text;
-
-            fileHashes1 = GetFileHashes(folderPath1);
-            fileHashes2 = GetFileHashes(folderPath2);
-
-            foreach (var file1 in fileHashes1)
+            try
             {
-                foreach (var file2 in fileHashes2)
-                {
-                    if (file1.Value == file2.Value)
-                    {
-                        if (!fileName1.Contains(file1.Key)) fileName1.Add(file1.Key);
-                        if (!fileName2.Contains(file2.Key)) fileName2.Add(file2.Key);
-                    }
-                }
+                SetFormEnableInTask(false);
+                string folderPath1 = @txtPath1.Text;
+                string folderPath2 = @txtPath2.Text;
+
+                SetLblProInTask("Get file information...");
+                bgWorker.ReportProgress(0);
+                List<string> folderList = GetParentPathOrPaths(folderPath1, folderPath2);
+                SetFileHashToDB(folderList);
+
+                SetLblProInTask("Create same file list...");
+                bgWorker.ReportProgress(0);
+                FileContextList = fileInfoDBcontext.FileContext.OrderBy(x => x.FileMd5).ToList();
+                SaveToExcel();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message);
             }
         }
 
         private void btnRun_Click(object sender, EventArgs e)
         {
-            fileName1 = new List<string>();
-            fileName2 = new List<string>();
+            FileContextList = new();
             if (bgWorker.IsBusy != true)
             {
                 bgWorker.RunWorkerAsync();
@@ -91,7 +126,7 @@ namespace FileCompare
 
         private void SetFormEnable(bool isEnable)
         {
-            foreach (Control control in Controls)
+            foreach (System.Windows.Forms.Control control in Controls)
             {
                 if (control != panel1)
                 {
@@ -101,37 +136,59 @@ namespace FileCompare
             panel1.Visible = !isEnable;
         }
 
-        private void SetListInTask()
+        private void SetLblProInTask(string lblText)
         {
             try
             {
-                DelegateSetList delegateSetList = new DelegateSetList(SetList);
-                this.Invoke(delegateSetList);
+                DelegateSetLblPro delegateSetLblPro = new DelegateSetLblPro(SetLblPro);
+                this.Invoke(delegateSetLblPro, lblText);
             }
             catch (Exception)
             {
             }
         }
 
-        private void SetList()
+        private void SetLblPro(string lblText)
         {
-            listView1.Items.Clear();
-            listView1.Items.AddRange(fileName1.ConvertAll(x => new ListViewItem(x)).ToArray());
-            listView2.Items.Clear();
-            listView2.Items.AddRange(fileName2.ConvertAll(x => new ListViewItem(x)).ToArray());
+            lblPro.Text = lblText;
         }
 
-
-        private ConcurrentDictionary<string, (long size, string hash)> GetFileHashes(string folderPath)
+        private List<string> GetParentPathOrPaths(string path1, string path2)
         {
-            var fileHashes = new ConcurrentDictionary<string, (long size, string hash)>();
+            string fullPath1 = Path.GetFullPath(path1).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            string fullPath2 = Path.GetFullPath(path2).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+
+            var result = new List<string>();
+
+            if (fullPath2.StartsWith(fullPath1, StringComparison.OrdinalIgnoreCase))
+            {
+                result.Add(fullPath1);
+            }
+            else if (fullPath1.StartsWith(fullPath2, StringComparison.OrdinalIgnoreCase))
+            {
+                result.Add(fullPath2);
+            }
+            else
+            {
+                result.Add(fullPath1);
+                result.Add(fullPath2);
+            }
+
+            return result;
+        }
+
+        private void SetFileHashToDB(List<string> folderList)
+        {
             var fileList = new List<string>();
 
             try
             {
-                foreach (var file in EnumerateFilesSafe(folderPath))
+                foreach (var folderPath in folderList)
                 {
-                    fileList.Add(file);
+                    foreach (var file in EnumerateFilesSafe(folderPath))
+                    {
+                        fileList.Add(file);
+                    }
                 }
             }
             catch (UnauthorizedAccessException ex)
@@ -139,21 +196,219 @@ namespace FileCompare
                 Console.WriteLine($"Access denied to folder: {ex.Message}");
             }
 
-            Parallel.ForEach(fileList, filePath =>
+            int totalFile = 0;
+            foreach (var filePath in fileList)
             {
                 try
                 {
                     var fileInfo = new FileInfo(filePath);
                     string hash = ComputeMD5(filePath);
-                    fileHashes[filePath] = (fileInfo.Length, hash);
+                    FileContext fileContext = new()
+                    {
+                        FolderPath = Path.GetDirectoryName(filePath),
+                        FilePath = filePath,
+                        FileName = Path.GetFileName(filePath),
+                        FileMd5 = hash,
+                        FileSize = fileInfo.Length
+                    };
+
+                    var existingEntity = fileInfoDBcontext.FileContext.SingleOrDefault(e => e.FilePath == fileContext.FilePath);
+                    if (existingEntity != null)
+                    {
+                        fileInfoDBcontext.FileContext.Remove(existingEntity);
+                    }
+                    fileInfoDBcontext.FileContext.Add(fileContext);
+
+                    totalFile++;
+                    int progress = (int)(((double)(totalFile) / fileList.Count) * 100);
+                    bgWorker.ReportProgress(progress);
                 }
                 catch (UnauthorizedAccessException)
                 {
                     Console.WriteLine($"Access denied to file: {filePath}");
                 }
-            });
+            }
+            fileInfoDBcontext.SaveChanges();
+        }
 
-            return fileHashes;
+        private void SaveToExcel()
+        {
+            if (!File.Exists(reportFile))
+            {
+                using (SpreadsheetDocument spreadsheetDocument = SpreadsheetDocument.Create(reportFile, SpreadsheetDocumentType.Workbook))
+                {
+                    WorkbookPart workbookPart = spreadsheetDocument.AddWorkbookPart();
+                    workbookPart.Workbook = new Workbook();
+                    WorksheetPart worksheetPart = workbookPart.AddNewPart<WorksheetPart>();
+                    worksheetPart.Worksheet = new Worksheet(new SheetData());
+                    WorkbookStylesPart stylePart = workbookPart.AddNewPart<WorkbookStylesPart>();
+                    stylePart.Stylesheet = CreateStylesheet();
+                    stylePart.Stylesheet.Save();
+                    Sheets sheets = spreadsheetDocument.WorkbookPart.Workbook.AppendChild(new Sheets());
+                    Sheet sheet = new Sheet() { Id = spreadsheetDocument.WorkbookPart.GetIdOfPart(worksheetPart), SheetId = 1, Name = "Sheet1" };
+                    sheets.Append(sheet);
+
+                    SetSheetHeader(worksheetPart);
+                    SetSheetContent(worksheetPart);
+
+                    // Save changes to the document
+                    workbookPart.Workbook.Save();
+                }
+            }
+            else
+            {
+                using (SpreadsheetDocument spreadsheetDocument = SpreadsheetDocument.Open(reportFile, true))
+                {
+                    WorkbookPart workbookPart = spreadsheetDocument.WorkbookPart;
+                    WorksheetPart newWorksheetPart = workbookPart.AddNewPart<WorksheetPart>();
+                    newWorksheetPart.Worksheet = new Worksheet(new SheetData());
+                    uint newSheetId = workbookPart.Workbook.Sheets.Elements<Sheet>().Select(s => s.SheetId.Value).Max() + 1;
+                    Sheets sheets = workbookPart.Workbook.GetFirstChild<Sheets>();
+                    Sheet newSheet = new Sheet() { Id = spreadsheetDocument.WorkbookPart.GetIdOfPart(newWorksheetPart), SheetId = newSheetId, Name = $"Sheet{newSheetId}" };
+                    sheets.Append(newSheet);
+                    SetSheetHeader(newWorksheetPart);
+                    SetSheetContent(newWorksheetPart);
+
+                    // Save changes to the document
+                    workbookPart.Workbook.Save();
+                }
+            }
+        }
+
+        private Stylesheet CreateStylesheet()
+        {
+            Fonts fonts = new Fonts(
+                new Font(new FontSize() { Val = 12 }),
+                new Font(
+                    new FontSize() { Val = 16 },
+                    new Bold(),
+                    new Color() { Rgb = "000000" }
+                )
+            );
+            Fills fills = new Fills(
+                new Fill(),
+                new Fill(
+                    new PatternFill(
+                        new ForegroundColor()
+                        {
+                            Rgb = new HexBinaryValue() { Value = "FFFFFF" }
+                        }
+                    )
+                    { PatternType = PatternValues.Solid }),
+                new Fill(
+                    new PatternFill(
+                        new ForegroundColor()
+                        {
+                            Rgb = new HexBinaryValue() { Value = "D3D3D3" }
+                        }
+                    )
+                    { PatternType = PatternValues.Solid })
+            );
+            Borders borders = new Borders(
+                new Border(),
+                new Border(
+                    new LeftBorder(new Color() { Auto = true })
+                    {
+                        Style = BorderStyleValues.Thin
+                    },
+                    new RightBorder(new Color() { Auto = true })
+                    {
+                        Style = BorderStyleValues.Thin
+                    },
+                    new TopBorder(new Color() { Auto = true })
+                    {
+                        Style = BorderStyleValues.Thin
+                    },
+                    new BottomBorder(new Color() { Auto = true })
+                    {
+                        Style = BorderStyleValues.Thin
+                    },
+                    new DiagonalBorder())
+            );
+            CellFormats cellFormats = new CellFormats(
+                new CellFormat { FontId = 1, FillId = 1, BorderId = 1 },
+                new CellFormat { BorderId = 1 },
+                new CellFormat { FontId = 1, FillId = 2, BorderId = 1 }
+            );
+            return new Stylesheet(fonts, fills, borders, cellFormats);
+        }
+
+        private void SetSheetHeader(WorksheetPart worksheetPart)
+        {
+            string[] headers = { "GroupID", "FileName", "CMD", "Path", "CMD" };
+            char startColumn = 'B';
+            uint startRow = 2;
+
+            for (int i = 0; i < headers.Length; i++)
+            {
+                string cellReference = $"{(char)(startColumn + i)}";
+                SetCellValue(worksheetPart, cellReference, startRow, 2, headers[i]);
+            }
+        }
+
+        private void SetSheetContent(WorksheetPart worksheetPart)
+        {
+            int totalFile = 0;
+            string cellReference = string.Empty;
+            string tempGroup = string.Empty;
+            int groupID = 0;
+            uint startRow = 3;
+            foreach (var file in FileContextList)
+            {
+                totalFile++;
+                int progress = (int)(((double)(totalFile) / FileContextList.Count) * 100);
+                bool hasDel = false;
+                if (tempGroup != file.FileMd5)
+                {
+                    tempGroup = file.FileMd5;
+                    groupID++;
+                    hasDel = true;
+                }
+
+                char startColumn = 'B';
+                cellReference = $"{(char)(startColumn++)}";
+                SetCellValue(worksheetPart, cellReference, startRow, 1, $"{groupID}");
+                cellReference = $"{(char)(startColumn++)}";
+                SetCellValue(worksheetPart, cellReference, startRow, 1, file.FileName);
+                cellReference = $"{(char)(startColumn++)}";
+                SetCellValue(worksheetPart, cellReference, startRow, 1, hasDel ? "" : "del \"");
+                cellReference = $"{(char)(startColumn++)}";
+                SetCellValue(worksheetPart, cellReference, startRow, 1, file.FilePath);
+                cellReference = $"{(char)(startColumn++)}";
+                SetCellValue(worksheetPart, cellReference, startRow, 1, "\"");
+                startRow++;
+                bgWorker.ReportProgress(progress);
+            }
+        }
+
+        public Cell SetCellValue(WorksheetPart worksheetPart, string columnName, uint rowIndex, uint styleIndex, string text)
+        {
+            Worksheet worksheet = worksheetPart.Worksheet;
+            SheetData sheetData = worksheet.GetFirstChild<SheetData>();
+
+            Row row = sheetData.Elements<Row>().FirstOrDefault(r => r.RowIndex == rowIndex);
+            if (row == null)
+            {
+                row = new Row { RowIndex = rowIndex };
+                sheetData.Append(row);
+            }
+
+            string cellReference = columnName + rowIndex;
+            Cell cell = row.Elements<Cell>().FirstOrDefault(c => c.CellReference.Value == cellReference);
+            if (cell != null)
+                return cell;
+            Cell refCell = row.Elements<Cell>()
+                .FirstOrDefault(c => string.Compare(c.CellReference.Value, cellReference, true) > 0);
+            Cell newCell = new Cell()
+            {
+                CellReference = cellReference
+            };
+            row.InsertBefore(newCell, refCell);
+
+            newCell.CellValue = new CellValue(text);
+            newCell.DataType = new EnumValue<CellValues>(CellValues.String);
+            newCell.StyleIndex = styleIndex;
+            return newCell;
         }
 
         private IEnumerable<string> EnumerateFilesSafe(string path)
@@ -176,56 +431,12 @@ namespace FileCompare
 
         private string ComputeMD5(string filePath)
         {
-            var md5 = HashLib.HashFactory.Crypto.CreateMD5();
-            using (var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read))
+            using (var md5 = MD5.Create())
             {
-                var buffer = new byte[8192];
-                int bytesRead;
-                while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
+                using (var stream = File.OpenRead(filePath))
                 {
-                    md5.TransformBytes(buffer, 0, bytesRead);
-                }
-            }
-            var hashBytes = md5.TransformFinal().GetBytes();
-            return BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
-        }
-
-        private void listView1_KeyDown(object sender, KeyEventArgs e)
-        {
-            if (e.Control && e.KeyCode == Keys.C)
-            {
-                StringBuilder sb = new StringBuilder();
-                foreach (ListViewItem item in listView1.SelectedItems)
-                {
-                    sb.AppendLine(item.Text);
-                }
-                Clipboard.SetDataObject(sb.ToString());
-            }
-            else if (e.Control && e.KeyCode == Keys.A)
-            {
-                foreach (ListViewItem item in listView1.Items)
-                {
-                    item.Selected = true;
-                }
-            }
-        }
-
-        private void listView2_KeyDown(object sender, KeyEventArgs e)
-        {
-            if (e.Control && e.KeyCode == Keys.C)
-            {
-                StringBuilder sb = new StringBuilder();
-                foreach (ListViewItem item in listView2.SelectedItems)
-                {
-                    sb.AppendLine(item.Text);
-                }
-                Clipboard.SetDataObject(sb.ToString());
-            }
-            else if (e.Control && e.KeyCode == Keys.A)
-            {
-                foreach (ListViewItem item in listView2.Items)
-                {
-                    item.Selected = true;
+                    byte[] hash = md5.ComputeHash(stream);
+                    return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
                 }
             }
         }
